@@ -1,0 +1,91 @@
+import random
+import threading
+from scapy.packet import Packet
+from scapy.sendrecv import send, sniff
+from scapy.layers.inet import TCP, IP, Ether, ICMP
+from scapy.all import *
+
+PRIVATE_IFACE = "eth0"
+PRIVATE_IP = "10.0.0.2"
+
+PUBLIC_IFACE = "eth1"
+PUBLIC_IP = "172.16.20.2"
+
+class client_ip:
+    def __init__(self):
+        self.src_ip = ""
+        self.src_port = 0
+        self.new_port = 0
+        self.src_dst = ""
+        self.ID_save = 0
+client = client_ip()
+
+def process_pkt_private(pkt: Packet):        
+    print("received pkt from private interface", pkt.sniffed_on, pkt.summary())
+    global client
+    if (ICMP in pkt and TCP not in pkt):
+        if pkt[IP].src != PUBLIC_IP:
+            client.src_ip = pkt[IP].src 
+            print('\tICMP Packet captured on private interface')
+            # Create a new IP packet with specified src and dst
+            client.ID_save = pkt[ICMP].id
+            new_pkt = IP(src=PUBLIC_IP, dst=pkt[IP].dst) / pkt[ICMP]
+            # Send the new packet over the private interface
+            send(new_pkt, iface=PUBLIC_IFACE, verbose=False)
+    elif (TCP in pkt and ICMP not in pkt):
+        if pkt[IP].dport == 80 and pkt[IP].src != PUBLIC_IP and pkt[IP].dport != client.new_port:
+            print('\tTCP Packet captured on private interface')
+            # Creating links
+            client.src_ip = pkt[IP].src
+            client.new_port = 10555
+            client.src_port = pkt[IP].sport
+            # # Create a new IP packet with src and dst + port src and dst
+            new_pkt = IP(src=PUBLIC_IP, dst=pkt[IP].dst) / pkt[TCP]
+            TCP(sport=client.new_port, dport=pkt[IP].dport)
+            del new_pkt[IP].chksum
+            del new_pkt[TCP].chksum
+            send(new_pkt, iface=PUBLIC_IFACE, verbose=False)
+            
+
+def process_pkt_public(pkt: Packet):
+    global client
+    if (ICMP in pkt and TCP not in pkt):
+        # Only runs if coming from the server
+        if pkt[IP].src != PUBLIC_IP:
+            print('\tICMP Packet captured on public interface')
+            pktDst = client.src_ip
+            # Create a new IP packet with specified src and dst
+            new_pkt = IP(src=pkt[IP].src, dst=pktDst) / pkt[ICMP]
+            # Send the new packet over the public interface
+            send(new_pkt, iface=PRIVATE_IFACE, verbose=False)
+    elif (TCP in pkt and ICMP not in pkt):
+        # For some reason a port is being flooded by something else so I will check if the port is going to 80 or from 80
+        #pkt[IP].sport = client.src_port
+        if pkt[IP].src != "129.114.26.193" and pkt[IP].dst != "129.114.26.193" and pkt[IP].src != "64.4.54.254" and pkt[IP].dst != "64.4.54.254" and pkt[IP].src != PUBLIC_IP:
+            print('\tTCP Packet captured on public interface')
+            pktDport = client.src_port
+            pktDst = client.src_ip
+            new_pkt = IP(src=pkt[IP].src, dst=client.src_ip) / pkt[TCP]
+            TCP(sport = pkt[IP].sport, dport=pktDport)
+            del new_pkt[IP].chksum
+            del new_pkt[TCP].chksum
+            send(new_pkt, iface=PRIVATE_IFACE, verbose=False)
+
+def private_listener():
+    print("sniffing packets on the private interface")
+    sniff(prn=process_pkt_private, iface=PRIVATE_IFACE, filter="icmp or tcp")
+
+def public_listener():
+    print("sniffing packets on the public interface")
+    sniff(prn=process_pkt_public, iface=PUBLIC_IFACE, filter="icmp or tcp")
+
+def main():
+    thread1 = threading.Thread(target=private_listener)
+    thread2 = threading.Thread(target=public_listener)
+    print("starting multiple sniffing threads...")
+    thread1.start()
+    thread2.start()
+    thread1.join()
+    thread2.join()
+    
+main()
